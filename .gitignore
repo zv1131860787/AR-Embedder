@@ -1,0 +1,11 @@
+# 忽略Python缓存目录和文件
+__pycache__/
+*.pyc
+
+# 忽略环境变量文件和IDE配置目录
+.env
+.idea/
+.vscode/
+
+# 忽略所有.log文件
+*.log [6](@ref)
