@@ -191,6 +191,86 @@ class ContrastiveEncoderModel(nn.Module):
         }
 
 
+class RetroARModel(nn.Module):
+    def __init__(self, model_name_or_path: str, projection_dim: Optional[int] = None) -> None:
+        super().__init__()
+        self.encoder = AutoModelForMaskedLM.from_pretrained(model_name_or_path)
+        if not hasattr(self.encoder, "bert"):
+            raise ValueError("RetroARModel currently supports BERT-like masked LM backbones.")
+        self.lm = self.encoder  # for shared resize utilities
+        config = self.encoder.config
+        self.decoder_embeddings = self.encoder.bert.embeddings
+        self.decoder_layer = nn.TransformerDecoderLayer(
+            d_model=config.hidden_size,
+            nhead=config.num_attention_heads,
+            dim_feedforward=config.intermediate_size,
+            dropout=config.hidden_dropout_prob,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.cross_entropy = nn.CrossEntropyLoss()
+        self.projection = None
+        if projection_dim and projection_dim != config.hidden_size:
+            self.projection = nn.Linear(config.hidden_size, projection_dim)
+
+    def forward(
+        self,
+        encoder_input_ids: torch.Tensor,
+        encoder_attention_mask: torch.Tensor,
+        encoder_labels: torch.Tensor,
+        decoder_input_ids: torch.Tensor,
+        decoder_attention_mask: torch.Tensor,
+        decoder_labels: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        encoder_outputs: MaskedLMOutput = self.encoder(
+            encoder_input_ids,
+            attention_mask=encoder_attention_mask,
+            labels=encoder_labels,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        last_hidden = encoder_outputs.hidden_states[-1]
+        cls_hidden = last_hidden[:, :1, :]
+
+        decoder_embed = self.decoder_embeddings(input_ids=decoder_input_ids)
+        decoder_inputs = torch.cat([cls_hidden, decoder_embed[:, 1:, :]], dim=1)
+
+        tgt_key_padding_mask = decoder_attention_mask == 0
+        memory_key_padding_mask = encoder_attention_mask == 0
+
+        decoder_hidden = self.decoder_layer(
+            tgt=decoder_inputs,
+            memory=last_hidden,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=memory_key_padding_mask,
+        )
+        decoder_hidden = self.layer_norm(decoder_hidden)
+
+        pred_scores = self.encoder.cls(decoder_hidden)
+        decoder_loss = self.cross_entropy(
+            pred_scores.view(-1, self.encoder.config.vocab_size),
+            decoder_labels.view(-1),
+        )
+        total_loss = decoder_loss + encoder_outputs.loss
+
+        outputs = {
+            "loss": total_loss,
+            "encoder_mlm_loss": encoder_outputs.loss.detach(),
+            "decoder_mlm_loss": decoder_loss.detach(),
+        }
+        if self.projection is not None:
+            outputs["cls_projection"] = self.projection(cls_hidden.squeeze(1))
+        return outputs
+
+    def save_pretrained(self, output_dir: str) -> None:
+        self.encoder.save_pretrained(output_dir)
+
+    @classmethod
+    def from_pretrained(cls, model_name_or_path: str, projection_dim: Optional[int] = None) -> "RetroARModel":
+        return cls(model_name_or_path=model_name_or_path, projection_dim=projection_dim)
+
+
 class CustomRetroMAEModel(RetroMAEModel):
     def __init__(
         self,

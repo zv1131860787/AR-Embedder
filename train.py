@@ -9,10 +9,12 @@ from component.argument import parse_args
 from component.dataset import (
     ContrastiveCollator,
     ContrastiveDataset,
+    RetroARCollator,
+    RetroARDataset,
     RetroMAECollator,
     RetroMAEDataset,
 )
-from component.model import ContrastiveEncoderModel, CustomRetroMAEModel, RetroMAEModel
+from component.model import ContrastiveEncoderModel, CustomRetroMAEModel, RetroARModel, RetroMAEModel
 from component.trainer import ContrastiveTrainer, RetroMAETrainer
 
 
@@ -48,6 +50,29 @@ def main() -> None:
             pad_to_multiple_of=8 if args.fp16 else None,
         )
         model = RetroMAEModel(
+            model_name_or_path=args.model_name_or_path,
+            projection_dim=args.projection_dim,
+        )
+        _resize_token_embeddings(model, tokenizer, tie_lm_head=True)
+        trainer = RetroMAETrainer(
+            model=model,
+            args=args,
+            dataset=dataset,
+            collate_fn=collator,
+            tokenizer=tokenizer,
+        )
+    elif args.training_task == "retroar":
+        dataset = RetroARDataset(
+            file_path=args.train_file,
+            tokenizer=tokenizer,
+            max_seq_length=args.max_seq_length,
+            mask_ratio=args.doc_mask_ratio,
+        )
+        collator = RetroARCollator(
+            tokenizer=tokenizer,
+            pad_to_multiple_of=8 if args.fp16 else None,
+        )
+        model = RetroARModel(
             model_name_or_path=args.model_name_or_path,
             projection_dim=args.projection_dim,
         )

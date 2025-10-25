@@ -45,8 +45,8 @@ def parse_args() -> TrainArguments:
         "--training_task",
         type=str,
         default="retromae",
-        choices=["retromae", "contrastive", "custom"],
-        help="Choose RetroMAE pretraining or dual-encoder contrastive training.",
+        choices=["retromae", "retroar", "contrastive", "custom"],
+        help="Choose RetroMAE-style pretraining, RetroAR single-decoder pretraining, or dual-encoder contrastive training.",
     )
     parser.add_argument("--doc_mask_ratio", type=float, default=0.3)
     parser.add_argument("--projection_dim", type=int, default=768)
