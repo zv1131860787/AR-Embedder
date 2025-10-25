@@ -8,7 +8,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
-from .loss import ContrastiveLoss, RetroMAELoss
+from .loss import ContrastiveLoss
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +29,7 @@ class RetroMAETrainer:
         self.tokenizer = tokenizer
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
-        self.loss_fn = RetroMAELoss(
-            temperature=args.temperature,
-            contrastive_weight=args.contrastive_weight,
-            mlm_weight=args.mlm_weight,
-        )
-        self.loss_fn.to(self.device)
+        self.loss_fn = None
 
     def train(self) -> None:
         os.makedirs(self.args.output_dir, exist_ok=True)
@@ -69,20 +64,19 @@ class RetroMAETrainer:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 with torch.cuda.amp.autocast(enabled=self.args.fp16):
                     outputs = self.model(
-                        query_input_ids=batch["query_input_ids"],
-                        query_attention_mask=batch["query_attention_mask"],
-                        doc_input_ids=batch["doc_input_ids"],
-                        doc_attention_mask=batch["doc_attention_mask"],
-                        query_token_type_ids=batch.get("query_token_type_ids"),
-                        doc_token_type_ids=batch.get("doc_token_type_ids"),
+                        encoder_input_ids=batch["encoder_input_ids"],
+                        encoder_attention_mask=batch["encoder_attention_mask"],
+                        encoder_labels=batch["encoder_labels"],
+                        decoder_input_ids=batch["decoder_input_ids"],
+                        decoder_attention_mask=batch["decoder_attention_mask"],
+                        decoder_labels=batch["decoder_labels"],
                     )
-                    losses = self.loss_fn(
-                        outputs["query_embeddings"],
-                        outputs["doc_embeddings"],
-                        outputs["doc_logits"],
-                        batch["doc_labels"],
-                    )
-                    loss = losses["loss"] / self.args.gradient_accumulation_steps
+                    log_losses = {
+                        "loss": outputs["loss"].detach(),
+                        "encoder_mlm_loss": outputs["encoder_mlm_loss"],
+                        "decoder_mlm_loss": outputs["decoder_mlm_loss"],
+                    }
+                    loss = outputs["loss"] / self.args.gradient_accumulation_steps
                 scaler.scale(loss).backward()
                 if (step + 1) % self.args.gradient_accumulation_steps == 0:
                     scaler.unscale_(optimizer)
@@ -93,7 +87,7 @@ class RetroMAETrainer:
                     optimizer.zero_grad()
                     global_step += 1
                     if global_step % self.args.logging_steps == 0:
-                        self._log_step(global_step, losses)
+                        self._log_step(global_step, log_losses)
                     if global_step % self.args.save_steps == 0:
                         self._save_checkpoint(global_step)
                     if global_step >= total_update_steps:
@@ -114,11 +108,11 @@ class RetroMAETrainer:
 
     def _log_step(self, step: int, losses: Dict[str, torch.Tensor]) -> None:
         logger.info(
-            "step=%s loss=%.4f contrastive=%.4f mlm=%.4f",
+            "step=%s loss=%.4f encoder_mlm=%.4f decoder_mlm=%.4f",
             step,
             losses["loss"].item(),
-            losses["contrastive_loss"].item(),
-            losses["mlm_loss"].item(),
+            losses["encoder_mlm_loss"].item(),
+            losses["decoder_mlm_loss"].item(),
         )
 
     def _save_checkpoint(self, step: int, final: bool = False) -> None:
@@ -151,7 +145,7 @@ class ContrastiveTrainer:
         self.model.to(self.device)
         self.loss_fn = ContrastiveLoss(
             temperature=args.temperature,
-            contrastive_weight=args.contrastive_weight,
+            weight=args.contrastive_weight,
         )
         self.loss_fn.to(self.device)
 

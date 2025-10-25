@@ -31,6 +31,7 @@ class TrainArguments:
     seed: int
     fp16: bool
     dataloader_num_workers: int
+    custom_doc_encoder: Optional[str]
 
 
 def parse_args() -> TrainArguments:
@@ -44,7 +45,7 @@ def parse_args() -> TrainArguments:
         "--training_task",
         type=str,
         default="retromae",
-        choices=["retromae", "contrastive"],
+        choices=["retromae", "contrastive", "custom"],
         help="Choose RetroMAE pretraining or dual-encoder contrastive training.",
     )
     parser.add_argument("--doc_mask_ratio", type=float, default=0.3)
@@ -67,6 +68,12 @@ def parse_args() -> TrainArguments:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
+    parser.add_argument(
+        "--custom_doc_encoder",
+        type=str,
+        default=None,
+        help="Optional Hugging Face model name/path used as the document encoder for custom training.",
+    )
     args = parser.parse_args()
     return TrainArguments(
         model_name_or_path=args.model_name_or_path,
@@ -95,4 +102,5 @@ def parse_args() -> TrainArguments:
         seed=args.seed,
         fp16=args.fp16,
         dataloader_num_workers=args.dataloader_num_workers,
+        custom_doc_encoder=args.custom_doc_encoder,
     )

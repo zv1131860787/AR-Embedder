@@ -1,4 +1,3 @@
-import json
 import math
 import random
 from pathlib import Path
@@ -6,6 +5,7 @@ from typing import Dict, List, Optional
 
 import torch
 from torch.utils.data import Dataset
+from datasets import load_dataset
 
 
 class RetroMAEDataset(Dataset):
@@ -28,44 +28,52 @@ class RetroMAEDataset(Dataset):
         self._load()
 
     def _load(self) -> None:
-        with self.file_path.open("r", encoding="utf-8") as reader:
-            for line in reader:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                query = record.get("query")
-                document = record.get("document") or record.get("doc") or record.get("passage")
-                if not query:
-                    raise ValueError("Each training instance must provide a `query` field.")
-                if not document:
-                    document = query
-                encoded_query = self.tokenizer(
-                    query,
-                    truncation=True,
-                    max_length=self.max_seq_length,
-                    return_attention_mask=True,
-                    return_token_type_ids=True,
-                )
-                encoded_doc = self.tokenizer(
-                    document,
-                    truncation=True,
-                    max_length=self.max_seq_length,
-                    return_attention_mask=True,
-                    return_token_type_ids=True,
-                )
-                masked_doc = self._mask_tokens(encoded_doc["input_ids"])
-                self._samples.append(
-                    {
-                        "query_input_ids": encoded_query["input_ids"],
-                        "query_attention_mask": encoded_query["attention_mask"],
-                        "query_token_type_ids": encoded_query.get("token_type_ids"),
-                        "doc_input_ids": masked_doc["input_ids"],
-                        "doc_attention_mask": encoded_doc["attention_mask"],
-                        "doc_token_type_ids": encoded_doc.get("token_type_ids"),
-                        "doc_labels": masked_doc["labels"],
-                    }
-                )
+        dataset = load_dataset(
+            "json",
+            data_files={"train": str(self.file_path)},
+            split="train",
+        )
+        for record in dataset:
+            query = record.get("query")
+            document = record.get("document") or record.get("doc") or record.get("passage")
+            if not query:
+                raise ValueError("Each training instance must provide a `query` field.")
+            if not document:
+                document = query
+            encoded_query = self.tokenizer(
+                query,
+                truncation=True,
+                max_length=self.max_seq_length,
+                return_attention_mask=True,
+                return_token_type_ids=True,
+            )
+            encoded_doc = self.tokenizer(
+                document,
+                truncation=True,
+                max_length=self.max_seq_length,
+                return_attention_mask=True,
+                return_token_type_ids=True,
+            )
+            masked_query = self._mask_tokens(encoded_query["input_ids"])
+            masked_doc = self._mask_tokens(encoded_doc["input_ids"])
+            self._samples.append(
+                {
+                    "query_input_ids": encoded_query["input_ids"],
+                    "query_attention_mask": encoded_query["attention_mask"],
+                    "query_token_type_ids": encoded_query.get("token_type_ids"),
+                    "doc_input_ids": encoded_doc["input_ids"],
+                    "doc_attention_mask": encoded_doc["attention_mask"],
+                    "doc_token_type_ids": encoded_doc.get("token_type_ids"),
+                    "doc_mlm_input_ids": masked_doc["input_ids"],
+                    "doc_mlm_labels": masked_doc["labels"],
+                    "encoder_input_ids": masked_query["input_ids"],
+                    "encoder_attention_mask": encoded_query["attention_mask"],
+                    "encoder_labels": masked_query["labels"],
+                    "decoder_input_ids": masked_doc["input_ids"],
+                    "decoder_attention_mask": encoded_doc["attention_mask"],
+                    "decoder_labels": masked_doc["labels"],
+                }
+            )
 
     def _mask_tokens(self, input_ids: List[int]) -> Dict[str, List[int]]:
         special_ids = set(self.tokenizer.all_special_ids)
@@ -110,7 +118,14 @@ class RetroMAECollator:
         batch["doc_attention_mask"] = self._pad(features, "doc_attention_mask", 0)
         if features[0].get("doc_token_type_ids") is not None:
             batch["doc_token_type_ids"] = self._pad(features, "doc_token_type_ids", 0)
-        batch["doc_labels"] = self._pad(features, "doc_labels", -100)
+        batch["doc_mlm_input_ids"] = self._pad(features, "doc_mlm_input_ids", self.tokenizer.pad_token_id)
+        batch["doc_mlm_labels"] = self._pad(features, "doc_mlm_labels", -100)
+        batch["encoder_input_ids"] = self._pad(features, "encoder_input_ids", self.tokenizer.pad_token_id)
+        batch["encoder_attention_mask"] = self._pad(features, "encoder_attention_mask", 0)
+        batch["encoder_labels"] = self._pad(features, "encoder_labels", -100)
+        batch["decoder_input_ids"] = self._pad(features, "decoder_input_ids", self.tokenizer.pad_token_id)
+        batch["decoder_attention_mask"] = self._pad(features, "decoder_attention_mask", 0)
+        batch["decoder_labels"] = self._pad(features, "decoder_labels", -100)
         return batch
 
     def _pad(self, features: List[Dict[str, List[int]]], key: str, pad_value: int) -> torch.Tensor:
@@ -135,42 +150,42 @@ class ContrastiveDataset(Dataset):
         self._load()
 
     def _load(self) -> None:
-        with self.file_path.open("r", encoding="utf-8") as reader:
-            for line in reader:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                query = record.get("query")
-                document = record.get("document") or record.get("doc") or record.get("passage")
-                if not query:
-                    raise ValueError("Each contrastive instance must provide a `query` field.")
-                if not document:
-                    document = query
-                encoded_query = self.tokenizer(
-                    query,
-                    truncation=True,
-                    max_length=self.max_seq_length,
-                    return_attention_mask=True,
-                    return_token_type_ids=True,
-                )
-                encoded_doc = self.tokenizer(
-                    document,
-                    truncation=True,
-                    max_length=self.max_seq_length,
-                    return_attention_mask=True,
-                    return_token_type_ids=True,
-                )
-                self._samples.append(
-                    {
-                        "query_input_ids": encoded_query["input_ids"],
-                        "query_attention_mask": encoded_query["attention_mask"],
-                        "query_token_type_ids": encoded_query.get("token_type_ids"),
-                        "doc_input_ids": encoded_doc["input_ids"],
-                        "doc_attention_mask": encoded_doc["attention_mask"],
-                        "doc_token_type_ids": encoded_doc.get("token_type_ids"),
-                    }
-                )
+        dataset = load_dataset(
+            "json",
+            data_files={"train": str(self.file_path)},
+            split="train",
+        )
+        for record in dataset:
+            query = record.get("query")
+            document = record.get("document") or record.get("doc") or record.get("passage")
+            if not query:
+                raise ValueError("Each contrastive instance must provide a `query` field.")
+            if not document:
+                document = query
+            encoded_query = self.tokenizer(
+                query,
+                truncation=True,
+                max_length=self.max_seq_length,
+                return_attention_mask=True,
+                return_token_type_ids=True,
+            )
+            encoded_doc = self.tokenizer(
+                document,
+                truncation=True,
+                max_length=self.max_seq_length,
+                return_attention_mask=True,
+                return_token_type_ids=True,
+            )
+            self._samples.append(
+                {
+                    "query_input_ids": encoded_query["input_ids"],
+                    "query_attention_mask": encoded_query["attention_mask"],
+                    "query_token_type_ids": encoded_query.get("token_type_ids"),
+                    "doc_input_ids": encoded_doc["input_ids"],
+                    "doc_attention_mask": encoded_doc["attention_mask"],
+                    "doc_token_type_ids": encoded_doc.get("token_type_ids"),
+                }
+            )
 
     def __len__(self) -> int:
         return len(self._samples)
