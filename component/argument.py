@@ -32,6 +32,7 @@ class TrainArguments:
     fp16: bool
     dataloader_num_workers: int
     custom_doc_encoder: Optional[str]
+    log_dir: Optional[str]
 
 
 def parse_args() -> TrainArguments:
@@ -69,6 +70,12 @@ def parse_args() -> TrainArguments:
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
     parser.add_argument(
+        "--log_dir",
+        type=str,
+        default=None,
+        help="Optional TensorBoardX log directory. When provided, training metrics will be written via SummaryWriter.",
+    )
+    parser.add_argument(
         "--custom_doc_encoder",
         type=str,
         default=None,
@@ -103,4 +110,5 @@ def parse_args() -> TrainArguments:
         fp16=args.fp16,
         dataloader_num_workers=args.dataloader_num_workers,
         custom_doc_encoder=args.custom_doc_encoder,
+        log_dir=args.log_dir,
     )

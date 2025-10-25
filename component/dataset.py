@@ -30,7 +30,7 @@ def _mask_tokens(tokenizer, input_ids: List[int], mask_ratio: float) -> Dict[str
     return {"input_ids": masked_input_ids, "labels": labels}
 
 
-def _build_retro_example(
+def _build_retro_mae_example(
     tokenizer,
     query: str,
     document: str,
@@ -60,6 +60,45 @@ def _build_retro_example(
         "decoder_input_ids": masked_doc["input_ids"],
         "decoder_attention_mask": encoded_doc["attention_mask"],
         "decoder_labels": masked_doc["labels"],
+    }
+
+
+def _build_retro_ar_example(
+    tokenizer,
+    query: str,
+    document: str,
+    max_seq_length: int,
+    mask_ratio: float,
+) -> Dict[str, List[int]]:
+    encoded_query = tokenizer(
+        query,
+        truncation=True,
+        max_length=max_seq_length,
+        return_attention_mask=True,
+        return_token_type_ids=True,
+    )
+    encoded_doc = tokenizer(
+        document,
+        truncation=True,
+        max_length=max_seq_length,
+        return_attention_mask=True,
+        return_token_type_ids=True,
+    )
+    masked_query = _mask_tokens(tokenizer, encoded_query["input_ids"], mask_ratio)
+    decoder_input_ids = list(encoded_doc["input_ids"])
+    decoder_labels = list(encoded_doc["input_ids"])
+    if decoder_labels:
+        decoder_labels[0] = -100
+    for idx, mask in enumerate(encoded_doc["attention_mask"]):
+        if mask == 0:
+            decoder_labels[idx] = -100
+    return {
+        "encoder_input_ids": masked_query["input_ids"],
+        "encoder_attention_mask": encoded_query["attention_mask"],
+        "encoder_labels": masked_query["labels"],
+        "decoder_input_ids": decoder_input_ids,
+        "decoder_attention_mask": encoded_doc["attention_mask"],
+        "decoder_labels": decoder_labels,
     }
 
 
@@ -110,7 +149,7 @@ class _RetroBaseDataset(Dataset):
 
 class RetroMAEDataset(_RetroBaseDataset):
     def _build_example(self, query: str, document: str) -> Dict[str, List[int]]:
-        return _build_retro_example(
+        return _build_retro_mae_example(
             tokenizer=self.tokenizer,
             query=query,
             document=document,
@@ -121,7 +160,7 @@ class RetroMAEDataset(_RetroBaseDataset):
 
 class RetroARDataset(_RetroBaseDataset):
     def _build_example(self, query: str, document: str) -> Dict[str, List[int]]:
-        return _build_retro_example(
+        return _build_retro_ar_example(
             tokenizer=self.tokenizer,
             query=query,
             document=document,

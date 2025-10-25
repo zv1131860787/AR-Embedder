@@ -1,7 +1,7 @@
 import logging
 import math
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 from torch.nn.utils import clip_grad_norm_
@@ -9,6 +9,11 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 from .loss import ContrastiveLoss
+
+try:
+    from tensorboardX import SummaryWriter
+except ImportError:  # pragma: no cover - optional dependency
+    SummaryWriter = None
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +34,11 @@ class RetroMAETrainer:
         self.tokenizer = tokenizer
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
+        self.writer: Optional[SummaryWriter] = None
+        if getattr(args, "log_dir", None):
+            if SummaryWriter is None:
+                raise ImportError("tensorboardX must be installed to use --log_dir for logging.")
+            self.writer = SummaryWriter(log_dir=args.log_dir)
         self.loss_fn = None
 
     def train(self) -> None:
@@ -71,11 +81,13 @@ class RetroMAETrainer:
                         decoder_attention_mask=batch["decoder_attention_mask"],
                         decoder_labels=batch["decoder_labels"],
                     )
-                    log_losses = {
-                        "loss": outputs["loss"].detach(),
-                        "encoder_mlm_loss": outputs["encoder_mlm_loss"],
-                        "decoder_mlm_loss": outputs["decoder_mlm_loss"],
-                    }
+                    encoder_loss = outputs.get("encoder_mlm_loss")
+                    decoder_loss = outputs.get("decoder_mlm_loss", outputs.get("decoder_ar_loss"))
+                    log_losses = {"loss": outputs["loss"].detach().cpu()}
+                    if encoder_loss is not None:
+                        log_losses["encoder_mlm_loss"] = encoder_loss.detach().cpu()
+                    if decoder_loss is not None:
+                        log_losses["decoder_loss"] = decoder_loss.detach().cpu()
                     loss = outputs["loss"] / self.args.gradient_accumulation_steps
                 scaler.scale(loss).backward()
                 if (step + 1) % self.args.gradient_accumulation_steps == 0:
@@ -95,6 +107,9 @@ class RetroMAETrainer:
             if global_step >= total_update_steps:
                 break
         self._save_checkpoint(global_step, final=True)
+        if self.writer is not None:
+            self.writer.flush()
+            self.writer.close()
 
     def _compute_train_steps(self, dataloader_len: int) -> int:
         steps_per_epoch = math.ceil(dataloader_len / self.args.gradient_accumulation_steps)
@@ -107,13 +122,16 @@ class RetroMAETrainer:
         logger.info("Total optimization steps: %s", total_steps)
 
     def _log_step(self, step: int, losses: Dict[str, torch.Tensor]) -> None:
-        logger.info(
-            "step=%s loss=%.4f encoder_mlm=%.4f decoder_mlm=%.4f",
-            step,
-            losses["loss"].item(),
-            losses["encoder_mlm_loss"].item(),
-            losses["decoder_mlm_loss"].item(),
-        )
+        msg = [
+            f"step={step}",
+            f"loss={losses['loss'].item():.4f}",
+        ]
+        if "encoder_mlm_loss" in losses:
+            msg.append(f"encoder_mlm={losses['encoder_mlm_loss'].item():.4f}")
+        if "decoder_loss" in losses:
+            msg.append(f"decoder={losses['decoder_loss'].item():.4f}")
+        logger.info(" ".join(msg))
+        self._write_summary(step, losses)
 
     def _save_checkpoint(self, step: int, final: bool = False) -> None:
         tag = "final" if final else f"step-{step}"
@@ -125,6 +143,13 @@ class RetroMAETrainer:
             "step": step,
         }
         torch.save(state, os.path.join(output_dir, "checkpoint.pt"))
+
+    def _write_summary(self, step: int, metrics: Dict[str, torch.Tensor]) -> None:
+        if self.writer is None:
+            return
+        for key, value in metrics.items():
+            scalar = value.item() if isinstance(value, torch.Tensor) else float(value)
+            self.writer.add_scalar(f"train/{key}", scalar, step)
 
 
 class ContrastiveTrainer:
@@ -148,6 +173,11 @@ class ContrastiveTrainer:
             weight=args.contrastive_weight,
         )
         self.loss_fn.to(self.device)
+        self.writer: Optional[SummaryWriter] = None
+        if getattr(args, "log_dir", None):
+            if SummaryWriter is None:
+                raise ImportError("tensorboardX must be installed to use --log_dir for logging.")
+            self.writer = SummaryWriter(log_dir=args.log_dir)
 
     def train(self) -> None:
         os.makedirs(self.args.output_dir, exist_ok=True)
@@ -193,6 +223,7 @@ class ContrastiveTrainer:
                         outputs["query_embeddings"],
                         outputs["doc_embeddings"],
                     )
+                    losses = {k: v.detach().cpu() for k, v in losses.items()}
                     loss = losses["loss"] / self.args.gradient_accumulation_steps
                 scaler.scale(loss).backward()
                 if (step + 1) % self.args.gradient_accumulation_steps == 0:
@@ -212,6 +243,9 @@ class ContrastiveTrainer:
             if global_step >= total_update_steps:
                 break
         self._save_checkpoint(global_step, final=True)
+        if self.writer is not None:
+            self.writer.flush()
+            self.writer.close()
 
     def _compute_train_steps(self, dataloader_len: int) -> int:
         steps_per_epoch = math.ceil(dataloader_len / self.args.gradient_accumulation_steps)
@@ -230,6 +264,7 @@ class ContrastiveTrainer:
             losses["loss"].item(),
             losses["contrastive_loss"].item(),
         )
+        self._write_summary(step, losses)
 
     def _save_checkpoint(self, step: int, final: bool = False) -> None:
         tag = "final" if final else f"step-{step}"
@@ -241,3 +276,10 @@ class ContrastiveTrainer:
             "step": step,
         }
         torch.save(state, os.path.join(output_dir, "checkpoint.pt"))
+
+    def _write_summary(self, step: int, metrics: Dict[str, torch.Tensor]) -> None:
+        if self.writer is None:
+            return
+        for key, value in metrics.items():
+            scalar = value.item() if isinstance(value, torch.Tensor) else float(value)
+            self.writer.add_scalar(f"train/{key}", scalar, step)

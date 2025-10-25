@@ -234,7 +234,16 @@ class RetroARModel(nn.Module):
         cls_hidden = last_hidden[:, :1, :]
 
         decoder_embed = self.decoder_embeddings(input_ids=decoder_input_ids)
-        decoder_inputs = torch.cat([cls_hidden, decoder_embed[:, 1:, :]], dim=1)
+        if decoder_embed.size(1) > 1:
+            shifted_decoder = decoder_embed[:, :-1, :]
+        else:
+            shifted_decoder = decoder_embed[:, :0, :]
+        decoder_inputs = torch.cat([cls_hidden, shifted_decoder], dim=1)
+        seq_len = decoder_inputs.size(1)
+        causal_mask = torch.triu(
+            torch.full((seq_len, seq_len), float("-inf"), device=decoder_inputs.device),
+            diagonal=1,
+        )
 
         tgt_key_padding_mask = decoder_attention_mask == 0
         memory_key_padding_mask = encoder_attention_mask == 0
@@ -242,6 +251,7 @@ class RetroARModel(nn.Module):
         decoder_hidden = self.decoder_layer(
             tgt=decoder_inputs,
             memory=last_hidden,
+            tgt_mask=causal_mask,
             tgt_key_padding_mask=tgt_key_padding_mask,
             memory_key_padding_mask=memory_key_padding_mask,
         )
@@ -257,7 +267,7 @@ class RetroARModel(nn.Module):
         outputs = {
             "loss": total_loss,
             "encoder_mlm_loss": encoder_outputs.loss.detach(),
-            "decoder_mlm_loss": decoder_loss.detach(),
+            "decoder_ar_loss": decoder_loss.detach(),
         }
         if self.projection is not None:
             outputs["cls_projection"] = self.projection(cls_hidden.squeeze(1))
